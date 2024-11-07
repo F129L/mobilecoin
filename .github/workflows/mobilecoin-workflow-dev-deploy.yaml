@@ -34,10 +34,20 @@ on:
         type: string
         required: true
       minimum_block:
-        description: "The minimum block height before the enviroment is ready"
+        description: "The minimum block height before the environment is ready"
         type: string
         required: false
         default: "500"
+      shard_size:
+        description: "View/Ledger Shard size in blocks"
+        type: string
+        required: false
+        default: "20000"
+      shard_exceed_block_height_by:
+        description: "View/Ledger New shards should start this many blocks before the end of the current shard"
+        type: string
+        required: false
+        default: "5000"
     secrets:
       DEV_RANCHER_CLUSTER:
         description: "Rancher cluster name"
@@ -57,10 +67,7 @@ jobs:
   setup-environment:
     uses: ./.github/workflows/mobilecoin-workflow-dev-setup-environment.yaml
     with:
-      block_version: ${{ inputs.block_version }}
-      chart_repo: ${{ inputs.chart_repo }}
       namespace: ${{ inputs.namespace }}
-      version: ${{ inputs.version }}
     secrets: inherit
 
   consensus-deploy:
@@ -69,24 +76,36 @@ jobs:
     runs-on: mcf-dev-small-x64
     strategy:
       matrix:
-        release_name:
-        - consensus-node-1
-        - consensus-node-2
-        - consensus-node-3
+        release:
+          - name: consensus-node-1
+            instance: 1
+          - name: consensus-node-2
+            instance: 2
+          - name: consensus-node-3
+            instance: 3
     steps:
-    # use values file because intel.com/sgx is hard to escape on the --set option.
     - name: Generate consensus-node values file
       run: |
         mkdir -p "${VALUES_BASE_PATH}"
         cat <<EOF > "${VALUES_BASE_PATH}/consensus-node-values.yaml"
-        image:
-          org: ${{ inputs.docker_image_org }}
-        global:
-          certManagerClusterIssuer: google-public-ca
+
+        mobilecoin:
+          network: ${{ inputs.namespace }}
+          partner: dev
+
         node:
+          config:
+            clientHostname: node${{ matrix.release.instance }}.${{ inputs.namespace }}.development.mobilecoin.com
+            peerHostname: peer${{ matrix.release.instance }}.${{ inputs.namespace }}.development.mobilecoin.com
+            blockVersion: ${{ inputs.block_version }}
+
           persistence:
             enabled: false
+
           ingress:
+            common:
+              tls:
+                clusterIssuer: google-public-ca
             clientAttest:
               rateLimits:
                 enabled: false
@@ -100,8 +119,8 @@ jobs:
         chart_name: consensus-node
         chart_version: ${{ inputs.version }}
         chart_values: ${{ env.VALUES_BASE_PATH }}/consensus-node-values.yaml
-        chart_wait_timeout: 10m
-        release_name: ${{ matrix.release_name }}
+        chart_wait_timeout: 60m
+        release_name: ${{ matrix.release.name }}
         namespace: ${{ inputs.namespace }}
         rancher_cluster: ${{ secrets.DEV_RANCHER_CLUSTER }}
         rancher_url: ${{ secrets.DEV_RANCHER_URL }}
@@ -138,7 +157,7 @@ jobs:
         chart_name: mobilecoind
         chart_version: ${{ inputs.version }}
         chart_values: ${{ env.VALUES_BASE_PATH }}/mobilecoind-values.yaml
-        chart_wait_timeout: 5m
+        chart_wait_timeout: 60m
         release_name: mobilecoind
         namespace: ${{ inputs.namespace }}
         rancher_cluster: ${{ secrets.DEV_RANCHER_CLUSTER }}
@@ -174,6 +193,7 @@ jobs:
           externalSecrets:
             signingCert:
               name: fog-report-signing-cert-a
+        EOF
 
     - name: Deploy fog-report-a
       uses: mobilecoinofficial/gha-k8s-toolbox@v1
@@ -219,6 +239,7 @@ jobs:
           externalSecrets:
             signingCert:
               name: fog-report-signing-cert-b
+        EOF
 
     - name: Deploy fog-report-b
       uses: mobilecoinofficial/gha-k8s-toolbox@v1
@@ -240,10 +261,10 @@ jobs:
     - consensus-deploy
     runs-on: mcf-dev-small-x64
     steps:
-    - name: Generate fog-view values file
+    - name: Generate fog-view-service values file
       run: |
         mkdir -p "${VALUES_BASE_PATH}"
-        cat <<EOF > "${VALUES_BASE_PATH}/fog-view-values.yaml"
+        cat <<EOF > "${VALUES_BASE_PATH}/fog-view-service-values.yaml"
         image:
           org: ${{ inputs.docker_image_org }}
 
@@ -252,29 +273,103 @@ jobs:
           partner: dev
 
         fogView:
+          responderID: fog.${{ inputs.namespace }}.development.mobilecoin.com
+          color: green
+
           router:
-            hosts:
-            - partner: a
-              responderID: fog.${{ inputs.namespace }}.development.mobilecoin.com
-            - partner: b
-              responderID: fog-b.${{ inputs.namespace }}.development.mobilecoin.com
             ingress:
               common:
                 blocklist:
                   enabled: false
                 tls:
                   clusterIssuer: google-public-ca
-
-    - name: Deploy fog-view
+        EOF
+    - name: Deploy fog-view-service
       uses: mobilecoinofficial/gha-k8s-toolbox@v1
       with:
         action: helm-deploy
         chart_repo: ${{ inputs.chart_repo }}
-        chart_name: fog-view
+        chart_name: fog-view-service
         chart_version: ${{ inputs.version }}
         chart_wait_timeout: 10m
-        chart_values: ${{ env.VALUES_BASE_PATH }}/fog-view-values.yaml
-        release_name: fog-view
+        chart_values: ${{ env.VALUES_BASE_PATH }}/fog-view-service-values.yaml
+        release_name: fog-view-service
+        namespace: ${{ inputs.namespace }}
+        rancher_cluster: ${{ secrets.DEV_RANCHER_CLUSTER }}
+        rancher_url: ${{ secrets.DEV_RANCHER_URL }}
+        rancher_token: ${{ secrets.DEV_RANCHER_TOKEN }}
+
+    - name: Generate fog-view-fsg-gr-z1 values file
+      run: |
+        mkdir -p "${VALUES_BASE_PATH}"
+        cat <<EOF > "${VALUES_BASE_PATH}/fog-view-fsg-values-gr-z1.yaml"
+        image:
+          org: ${{ inputs.docker_image_org }}
+
+        mobilecoin:
+          network: ${{ inputs.namespace }}
+          partner: dev
+
+        fogView:
+          responderID: fog.${{ inputs.namespace }}.development.mobilecoin.com
+          color: green
+          zone: westeurope-1
+
+          stackConfig:
+            network:
+              default:
+                shardSize: ${{ inputs.shard_size }}
+                exceedBlockHeightBy: ${{ inputs.shard_exceed_block_height_by }}
+        EOF
+
+    - name: Deploy fog-view-fsg-gr-z1
+      uses: mobilecoinofficial/gha-k8s-toolbox@v1
+      with:
+        action: helm-deploy
+        chart_repo: ${{ inputs.chart_repo }}
+        chart_name: fog-view-fsg
+        chart_version: ${{ inputs.version }}
+        chart_wait_timeout: 10m
+        chart_values: ${{ env.VALUES_BASE_PATH }}/fog-view-fsg-values-gr-z1.yaml
+        release_name: fog-view-fsg-gr-z1
+        namespace: ${{ inputs.namespace }}
+        rancher_cluster: ${{ secrets.DEV_RANCHER_CLUSTER }}
+        rancher_url: ${{ secrets.DEV_RANCHER_URL }}
+        rancher_token: ${{ secrets.DEV_RANCHER_TOKEN }}
+
+    - name: Generate fog-view-fsg-gr-z2 values file
+      run: |
+        mkdir -p "${VALUES_BASE_PATH}"
+        cat <<EOF > "${VALUES_BASE_PATH}/fog-view-fsg-values-gr-z2.yaml"
+        image:
+          org: ${{ inputs.docker_image_org }}
+
+        mobilecoin:
+          network: ${{ inputs.namespace }}
+          partner: dev
+
+        fogView:
+          responderID: fog.${{ inputs.namespace }}.development.mobilecoin.com
+          color: green
+          zone: westeurope-2
+
+          stackConfig:
+            network:
+              default:
+                shardSize: ${{ inputs.shard_size }}
+                exceedBlockHeightBy: ${{ inputs.shard_exceed_block_height_by }}
+        EOF
+
+    - name: Deploy fog-view-fsg-gr-z2
+      uses: mobilecoinofficial/gha-k8s-toolbox@v1
+      with:
+        action: helm-deploy
+        chart_repo: ${{ inputs.chart_repo }}
+        chart_name: fog-view-fsg
+        chart_version: ${{ inputs.version }}
+        chart_wait_timeout: 10m
+        chart_values: ${{ env.VALUES_BASE_PATH }}/fog-view-fsg-values-gr-z2.yaml
+        release_name: fog-view-fsg-gr-z2
         namespace: ${{ inputs.namespace }}
         rancher_cluster: ${{ secrets.DEV_RANCHER_CLUSTER }}
         rancher_url: ${{ secrets.DEV_RANCHER_URL }}
@@ -298,6 +393,11 @@ jobs:
           partner: dev
 
         fogLedger:
+          stackConfig:
+            network:
+              default:
+                shardSize: ${{ inputs.shard_size }}
+                exceedBlockHeightBy: ${{ inputs.shard_exceed_block_height_by }}
           router:
             hosts:
             - partner: a
@@ -310,6 +410,7 @@ jobs:
                   enabled: false
                 tls:
                   clusterIssuer: google-public-ca
+        EOF
 
 
     - name: Deploy fog-ledger
@@ -342,6 +443,7 @@ jobs:
         mobilecoin:
           network: ${{ inputs.namespace }}
           partner: dev
+        EOF
 
     - name: Deploy fog-ingest
       uses: mobilecoinofficial/gha-k8s-toolbox@v1.0.13

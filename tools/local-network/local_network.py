@@ -162,7 +162,7 @@ class Node:
         self.peers = peers
         self.quorum_set = quorum_set
         self.minimum_fee = 400_000_000
-        self.block_version = block_version or 3
+        self.block_version = block_version or 4
 
         self.consensus_process = None
         self.ledger_distribution_process = None
@@ -302,7 +302,6 @@ class Node:
             f'cd {PROJECT_DIR} && exec {TARGET_DIR}/ledger-distribution',
             f'--ledger-path {self.ledger_dir}',
             f'--dest "file://{self.ledger_distribution_dir}"',
-            f'--state-file {WORK_DIR}/ledger-distribution-state-{self.node_num}',
         ])
         print(f'Starting local ledger distribution: {cmd}')
         self.ledger_distribution_process = subprocess.Popen(cmd, shell=True)

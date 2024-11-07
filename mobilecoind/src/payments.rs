@@ -12,7 +12,7 @@ use mc_common::{
 use mc_connection::{
     BlockInfo, BlockchainConnection, ConnectionManager, RetryableUserTxConnection, UserTxConnection,
 };
-use mc_crypto_keys::RistrettoPublic;
+use mc_crypto_keys::{RistrettoPrivate, RistrettoPublic};
 use mc_crypto_ring_signature_signer::NoKeysRingSigner;
 use mc_fog_report_validation::FogPubkeyResolver;
 use mc_ledger_db::{Error as LedgerError, Ledger, LedgerDB};
@@ -60,6 +60,9 @@ pub struct Outlay {
 
     /// Destination.
     pub receiver: PublicAddress,
+
+    /// Optional tx private key to use.
+    pub tx_private_key: Option<RistrettoPrivate>,
 }
 
 /// An outlay, with token id information.
@@ -72,6 +75,9 @@ pub struct OutlayV2 {
 
     /// Destination.
     pub receiver: PublicAddress,
+
+    /// Optional tx private key to use.
+    pub tx_private_key: Option<RistrettoPrivate>,
 }
 
 /// A single pending transaction.
@@ -268,8 +274,7 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
     /// * `opt_fee` - Transaction fee value in smallest representable units. If
     ///   zero, use network-reported minimum fee.
     /// * `opt_tombstone` - Tombstone block. If zero, sets to default.
-    /// * `opt_memo_builder` - Optional memo builder to use instead of the
-    ///   default one (EmptyMemoBuilder).
+    /// * `memo_builder` - Memo builder to use.
     pub fn build_transaction(
         &self,
         sender_monitor_id: &MonitorId,
@@ -280,7 +285,7 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
         last_block_infos: &[BlockInfo],
         opt_fee: u64,
         opt_tombstone: u64,
-        opt_memo_builder: Option<Box<dyn MemoBuilder + 'static + Send + Sync>>,
+        memo_builder: Box<dyn MemoBuilder + 'static + Send + Sync>,
     ) -> Result<TxProposal, Error> {
         let logger = self.logger.new(o!("sender_monitor_id" => sender_monitor_id.to_string(), "outlays" => format!("{outlays:?}")));
         log::trace!(logger, "Building pending transaction...");
@@ -304,6 +309,7 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
             .map(|outlay_v1| OutlayV2 {
                 receiver: outlay_v1.receiver.clone(),
                 amount: Amount::new(outlay_v1.value, token_id),
+                tx_private_key: outlay_v1.tx_private_key,
             })
             .collect();
 
@@ -317,7 +323,7 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
             last_block_infos,
             opt_fee,
             opt_tombstone,
-            opt_memo_builder,
+            Some(memo_builder),
         )
     }
 
@@ -681,6 +687,7 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
         let outlays = vec![OutlayV2 {
             receiver: monitor_data.account_key.subaddress(subaddress_index),
             amount: Amount::new(total_value - fee, token_id),
+            tx_private_key: None,
         }];
 
         // Build and return the TxProposal object
@@ -785,6 +792,7 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
         let outlays = vec![OutlayV2 {
             receiver: receiver.clone(),
             amount: Amount::new(total_value - fee, token_id),
+            tx_private_key: None,
         }];
 
         // Build and return the TxProposal object
@@ -1276,7 +1284,12 @@ impl<T: BlockchainConnection + UserTxConnection + 'static, FPR: FogPubkeyResolve
                 confirmation,
                 ..
             } = tx_builder
-                .add_output(outlay.amount, &outlay.receiver, rng)
+                .add_output_with_tx_private_key(
+                    outlay.amount,
+                    &outlay.receiver,
+                    outlay.tx_private_key,
+                    rng,
+                )
                 .map_err(|err| Error::TxBuild(format!("failed adding output: {err}")))?;
 
             tx_out_to_outlay_index.insert(tx_out, i);
@@ -1640,6 +1653,7 @@ mod test {
                 attempted_spend_height: 0,
                 attempted_spend_tombstone: 0,
                 token_id: *token_id,
+                memo_payload: vec![],
             })
             .collect()
     }
